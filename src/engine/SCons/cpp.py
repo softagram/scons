@@ -20,17 +20,22 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
+import functools
+
+from common.fileutil import check_file_exists, fix_relative_path_ref
 
 __revision__ = "__FILE__ __REVISION__ __DATE__ __DEVELOPER__"
 
 __doc__ = """
 SCons C Pre-Processor module
 """
-import SCons.compat
+# import SCons.compat
 
 import os
 import re
+import codecs
 
+# TODO lagging behind, upgrade this and do necessary contributions back.
 #
 # First "subsystem" of regular expressions that we set up:
 #
@@ -45,26 +50,43 @@ import re
 cpp_lines_dict = {
     # Fetch the rest of a #if/#elif/#ifdef/#ifndef as one argument,
     # separated from the keyword by white space.
-    ('if', 'elif', 'ifdef', 'ifndef',)
-                        : '\s+(.+)',
+    (
+        'if',
+        'elif',
+        'ifdef',
+        'ifndef',
+    ):
+        r'\s+(.+)',
 
     # Fetch the rest of a #import/#include/#include_next line as one
     # argument, with white space optional.
-    ('import', 'include', 'include_next',)
-                        : '\s*(.+)',
+    (
+        'import',
+        'include',
+        'include_next',
+    ):
+        r'\s*(.+)',
 
     # We don't care what comes after a #else or #endif line.
-    ('else', 'endif',)  : '',
+    (
+        'else',
+        'endif',
+    ):
+        '',
 
     # Fetch three arguments from a #define line:
     #   1) The #defined keyword.
     #   2) The optional parentheses and arguments (if it's a function-like
     #      macro, '' if it's not).
     #   3) The expansion value.
-    ('define',)         : '\s+([_A-Za-z][_A-Za-z0-9_]*)(\([^)]*\))?\s*(.*)',
+    (
+        'define', ):
+        r'\s+([_A-Za-z][_A-Za-z0-9_]*)(\([^)]*\))?\s*(.*)',
 
     # Fetch the #undefed keyword from a #undef line.
-    ('undef',)          : '\s+([_A-Za-z][A-Za-z0-9_]*)',
+    (
+        'undef', ):
+        r'\s+([_A-Za-z][A-Za-z0-9_]*)',
 }
 
 # Create a table that maps each individual C preprocessor directive to
@@ -75,8 +97,11 @@ for op_list, expr in cpp_lines_dict.items():
     e = re.compile(expr)
     for op in op_list:
         Table[op] = e
+# noinspection PyUnboundLocalVariable
 del e
+# noinspection PyUnboundLocalVariable
 del op
+# noinspection PyUnboundLocalVariable
 del op_list
 
 # Create a list of the expressions we'll use to match all of the
@@ -84,23 +109,19 @@ del op_list
 # themselves *except* that we must use a negative lookahead assertion
 # when matching "if" so it doesn't match the "if" in "ifdef."
 override = {
-    'if'                        : 'if(?!def)',
+    'if': 'if(?!def)',
 }
-l = [override.get(x, x) for x in list(Table.keys())]
-
+l = [override.get(x, x) for x in list(Table.keys())]  # noqa
 
 # Turn the list of expressions into one big honkin' regular expression
 # that will match all the preprocessor lines at once.  This will return
 # a list of tuples, one for each preprocessor line.  The preprocessor
 # directive will be the first element in each tuple, and the rest of
 # the line will be the second element.
-e = '^\s*#\s*(' + '|'.join(l) + ')(.*)$'
+e = r'^\s*#\s*(' + '|'.join(l) + ')(.*)$'
 
 # And last but not least, compile the expression.
 CPP_Expression = re.compile(e, re.M)
-
-
-
 
 #
 # Second "subsystem" of regular expressions that we set up:
@@ -112,16 +133,16 @@ CPP_Expression = re.compile(e, re.M)
 # A dictionary that maps the C representation of Boolean operators
 # to their Python equivalents.
 CPP_to_Python_Ops_Dict = {
-    '!'         : ' not ',
-    '!='        : ' != ',
-    '&&'        : ' and ',
-    '||'        : ' or ',
-    '?'         : ' and ',
-    ':'         : ' or ',
-    '\r'        : '',
+    '!': ' not ',
+    '!=': ' != ',
+    '&&': ' and ',
+    '||': ' or ',
+    '?': ' and ',
+    ':': ' or ',
+    '\r': '',
 }
 
-CPP_to_Python_Ops_Sub = lambda m: CPP_to_Python_Ops_Dict[m.group(0)]
+CPP_to_Python_Ops_Sub = lambda m: CPP_to_Python_Ops_Dict[m.group(0)]  # noqa
 
 # We have to sort the keys by length so that longer expressions
 # come *before* shorter expressions--in particular, "!=" must
@@ -129,7 +150,7 @@ CPP_to_Python_Ops_Sub = lambda m: CPP_to_Python_Ops_Dict[m.group(0)]
 # re module, as late as version 2.2.2, empirically matches the
 # "!" in "!=" first, instead of finding the longest match.
 # What's up with that?
-l = sorted(list(CPP_to_Python_Ops_Dict.keys()), key=lambda a: len(a), reverse=True)
+l = sorted(list(CPP_to_Python_Ops_Dict.keys()), key=lambda a: len(a), reverse=True)  # noqa
 
 # Turn the list of keys into one regular expression that will allow us
 # to substitute all of the operators at once.
@@ -140,19 +161,17 @@ CPP_to_Python_Ops_Expression = re.compile(expr)
 
 # A separate list of expressions to be evaluated and substituted
 # sequentially, not all at once.
-CPP_to_Python_Eval_List = [
-    ['defined\s+(\w+)',         '"\\1" in __dict__'],
-    ['defined\s*\((\w+)\)',     '"\\1" in __dict__'],
-    ['/\*.*\*/',                ''],
-    ['/\*.*',                   ''],
-    ['//.*',                    ''],
-    ['(0x[0-9A-Fa-f]*)[UL]+',   '\\1'],
-]
+CPP_to_Python_Eval_List = [[r'defined\s+(\w+)', '"\\1" in __dict__'],
+                           [r'defined\s*\(\s*(\w+)\s*\)', '"\\1" in __dict__'], [r'/\*.*\*/', ''],
+                           [r'/\*.*', ''], ['//.*', ''], ['(0x[0-9A-Fa-f]*)[UL]+', '\\1'],
+                           ['([0-9]+)[ULSuls]+', '\\1']]
 
 # Replace the string representations of the regular expressions in the
 # list with compiled versions.
 for l in CPP_to_Python_Eval_List:
+    # noinspection PyTypeChecker
     l[0] = re.compile(l[0])
+
 
 # Wrap up all of the above into a handy function.
 def CPP_to_Python(s):
@@ -166,17 +185,16 @@ def CPP_to_Python(s):
     return s
 
 
-
 del expr
 del l
 del override
-
 
 
 class FunctionEvaluator(object):
     """
     Handles delayed evaluation of a #define function call.
     """
+
     def __init__(self, name, args, expansion):
         """
         Squirrels away the arguments and expansion value of a #define
@@ -190,6 +208,7 @@ class FunctionEvaluator(object):
         except AttributeError:
             pass
         self.expansion = expansion
+
     def __call__(self, *values):
         """
         Evaluates the expansion of a #define macro function called
@@ -207,13 +226,12 @@ class FunctionEvaluator(object):
 
         parts = []
         for s in self.expansion:
-            if not s in self.args:
+            if s not in self.args:
                 s = repr(s)
             parts.append(s)
         statement = ' + '.join(parts)
 
         return eval(statement, globals(), locals)
-
 
 
 # Find line continuations.
@@ -222,26 +240,33 @@ line_continuations = re.compile('\\\\\r?\n')
 # Search for a "function call" macro on an expansion.  Returns the
 # two-tuple of the "function" name itself, and a string containing the
 # arguments within the call parentheses.
-function_name = re.compile('(\S+)\(([^)]*)\)')
+function_name = re.compile(r'(\S+)\(([^)]*)\)')
 
 # Split a string containing comma-separated function call arguments into
 # the separate arguments.
-function_arg_separator = re.compile(',\s*')
+function_arg_separator = re.compile(r',\s*')
 
+
+@functools.lru_cache(maxsize=None)
+def fix_command(t, error_msg):
+    undefined_macro = error_msg.split('\'')[1]
+    t = re.sub(r'\b' + undefined_macro + r'\b', '"' + undefined_macro + '" in __dict__', t)
+    return t
 
 
 class PreProcessor(object):
     """
     The main workhorse class for handling C pre-processing.
     """
-    def __init__(self, current=os.curdir, cpppath=(), dict={}, all=0):
+
+    def __init__(self, current, cpppath, symbolsdict, all, case_sensitive_fs):
         global Table
 
         cpppath = tuple(cpppath)
 
         self.searchpath = {
-            '"' :       (current,) + cpppath,
-            '<' :       cpppath + (current,),
+            '"': (current, ) + cpppath,
+            '<': cpppath + (current, ),
         }
 
         # Initialize our C preprocessor namespace for tracking the
@@ -249,11 +274,12 @@ class PreProcessor(object):
         # for keywords on #ifdef/#ifndef lines, and to eval() the
         # expressions on #if/#elif lines (after massaging them from C to
         # Python).
-        self.cpp_namespace = dict.copy()
+        self.cpp_namespace = symbolsdict.copy()
         self.cpp_namespace['__dict__'] = self.cpp_namespace
+        self.include_deps = []
 
         if all:
-           self.do_include = self.all_include
+            self.do_include = self.all_include
 
         # For efficiency, a dispatch table maps each C preprocessor
         # directive (#if, #define, etc.) to the method that should be
@@ -262,12 +288,12 @@ class PreProcessor(object):
         # stack and changing what method gets called for each relevant
         # directive we might see next at this level (#else, #elif).
         # #endif will simply pop the stack.
-        d = {
-            'scons_current_file'    : self.scons_current_file
-        }
+        d = {'scons_current_file': self.scons_current_file}
         for op in list(Table.keys()):
             d[op] = getattr(self, 'do_' + op)
         self.default_table = d
+        self.case_sensitive_fs = case_sensitive_fs
+        self.files = []
 
     # Controlling methods.
 
@@ -284,7 +310,7 @@ class PreProcessor(object):
         global CPP_Expression, Table
         contents = line_continuations.sub('', contents)
         cpp_tuples = CPP_Expression.findall(contents)
-        return  [(m[0],) + Table[m[0]].match(m[1]).groups() for m in cpp_tuples]
+        return [(m[0], ) + Table[m[0]].match(m[1]).groups() for m in cpp_tuples]
 
     def __call__(self, file):
         """
@@ -311,9 +337,9 @@ class PreProcessor(object):
             t = self.tuples.pop(0)
             # Uncomment to see the list of tuples being processed (e.g.,
             # to validate the CPP lines are being translated correctly).
-            #print(t)
+            # print(t)
             self.dispatch_table[t[0]](t)
-        return self.finalize_result(fname)
+        return self.finalize_result(fname), self.include_deps
 
     # Dispatch table stack manipulation methods.
 
@@ -330,8 +356,10 @@ class PreProcessor(object):
         Pops the previous dispatch table off the stack and makes it the
         current one.
         """
-        try: self.dispatch_table = self.stack.pop()
-        except IndexError: pass
+        try:
+            self.dispatch_table = self.stack.pop()
+        except IndexError:
+            pass
 
     # Utility methods.
 
@@ -354,12 +382,55 @@ class PreProcessor(object):
         track #define values.
         """
         t = CPP_to_Python(' '.join(t[1:]))
-        try: return eval(t, self.cpp_namespace)
-        except (NameError, TypeError): return 0
+        try:
+            # cplusplus version checks with format like "if  __cplusplus >= 201103L" are causing
+            # problems. ( >= 201103 would be licely ok).
+            # This quick fix make all of them to be evaluated as 0. It should be quite ok because
+            # compiler version is not known at the moment.
+            if t and '__cplusplus' in t:
+                return 0
+            # TODO does not work e.g. when  t == ' defined( ABC ) '
+            return eval(t, self.cpp_namespace)
+        except (NameError, TypeError) as err_main:
+            if t:
+                # C preprocess code usually has clauses like "if (SOME_MACRO)" even if SOME_MACRO is
+                # undefined. Here we will make that situation to evaluate to False.
+                error_msg = str(err_main)
+                if not error_msg.endswith('\' is not defined'):
+                    print(f'Identifier issue #1  file={self.current_file}: {t} err:{err_main}')
+                    return 0
+
+                while error_msg.endswith('\' is not defined'):
+                    new_t = fix_command(t, error_msg)
+                    if t != new_t:
+                        t = new_t
+                    else:
+                        break
+                    try:
+                        return eval(t, self.cpp_namespace)
+                    except (NameError, TypeError) as err:
+                        error_msg = str(err)
+                    except SyntaxError as se:
+                        if t:
+                            print(f'Syntax (2) is not supported  file={self.current_file}: '
+                                  f'err: {t}  {se}  orig err: {err_main}')
+                        return 0
+                print(f'Identifier issue #2  file={self.current_file}: {t} err: {error_msg}')
+
+            return 0
+        except SyntaxError as se:
+            # Formulas like:
+            # 'GTEST_LANG_CXX11  and      ( not "__GLIBCXX__" in __dict__  or  (
+            #     __GLIBCXX__ >= 20110325ul  and'
+            # are causing syntax errors. Ignore them so far.
+            if t:
+                print(f'Syntax (1) is not supported  file={self.current_file}: {t}   Error: {se}')
+            return 0
 
     def initialize_result(self, fname):
         self.result = [fname]
 
+    # noinspection PyUnusedLocal
     def finalize_result(self, fname):
         return self.result[1:]
 
@@ -367,18 +438,44 @@ class PreProcessor(object):
         """
         Finds the #include file for a given preprocessor tuple.
         """
-        fname = t[2]
-        for d in self.searchpath[t[1]]:
-            if d == os.curdir:
-                f = fname
-            else:
-                f = os.path.join(d, fname)
-            if os.path.isfile(f):
-                return f
+        if t and len(t) > 2:
+            fname = t[2]
+            pos = fname.rfind('"')
+            if pos > 2:
+                fname = fname[:pos]
+
+            fname = fname.replace('"', '')
+
+            for d in self.searchpath[t[1]]:
+                if d == os.curdir:
+                    f = fname
+                else:
+                    f = os.path.join(d, fname)
+
+                # Replace Windows slashes to make file finding possible.
+                f = f.replace('\\', '/')
+
+                f = fix_relative_path_ref(f)
+
+                f_with_correct_case = check_file_exists(f, self.case_sensitive_fs)
+                if f_with_correct_case is not None:
+                    return f_with_correct_case
+
+            # check also folder of the current file TODO Check current path of any of the files
+            # in the including file stack
+            dir_name = os.path.dirname(self.current_file)
+            f = os.path.join(dir_name, fname)
+            f_with_correct_case = check_file_exists(f, self.case_sensitive_fs)
+            if f_with_correct_case is not None:
+                return f_with_correct_case
+        else:
+            if t:
+                print(f'Failed to handle #include  file={self.current_file}: {t}')
         return None
 
-    def read_file(self, file):
-        with open(file) as f:
+    @staticmethod
+    def read_file(file):
+        with codecs.open(file, "r", encoding='utf-8', errors='ignore') as f:
             return f.read()
 
     # Start and stop processing include lines.
@@ -411,8 +508,8 @@ class PreProcessor(object):
         """
         d = self.dispatch_table
         d['import'] = self.do_nothing
-        d['include'] =  self.do_nothing
-        d['include_next'] =  self.do_nothing
+        d['include'] = self.do_nothing
+        d['include_next'] = self.do_nothing
 
     # Default methods for handling all of the preprocessor directives.
     # (Note that what actually gets called for a given directive at any
@@ -480,6 +577,9 @@ class PreProcessor(object):
         """
         _, name, args, expansion = t
         try:
+            # Handle cases such as 1024u or 1024L
+            if len(expansion) > 0 and expansion[0].isdigit() and not expansion[-1].isdigit():
+                expansion = re.search(r'[0-9]+', expansion).group(0)
             expansion = int(expansion)
         except (TypeError, ValueError):
             pass
@@ -493,8 +593,10 @@ class PreProcessor(object):
         """
         Default handling of a #undef line.
         """
-        try: del self.cpp_namespace[t[1]]
-        except KeyError: pass
+        try:
+            del self.cpp_namespace[t[1]]
+        except KeyError:
+            pass
 
     def do_import(self, t):
         """
@@ -508,15 +610,36 @@ class PreProcessor(object):
         Default handling of a #include line.
         """
         t = self.resolve_include(t)
-        include_file = self.find_include_file(t)
-        if include_file:
-            #print("include_file =", include_file)
-            self.result.append(include_file)
+        same_file = False
+        if t and len(t) > 2:
+            cur_fname = self.current_file[self.current_file.rfind('/') + 1:]
+            if t[2] == cur_fname or t[2].endswith('/' + cur_fname):
+                same_file = True
+
+        include_file = None
+        if not same_file:
+            include_file = self.find_include_file(t)
+            if include_file and include_file == self.current_file:
+                same_file = True
+
+        if not same_file and include_file:
+            # print("include_file =", include_file)
+            if include_file in self.files:
+                return
             contents = self.read_file(include_file)
-            new_tuples = [('scons_current_file', include_file)] + \
-                         self.tupleize(contents) + \
+            including_file = self.current_file
+            if '..' in including_file:
+                including_file = os.path.normpath(including_file)
+            if '..' in include_file:
+                include_file = os.path.normpath(include_file)
+            self.result.append(include_file)
+            self.include_deps.append((including_file, include_file))
+            new_tuples = [('scons_current_file', include_file)] + self.tupleize(contents) + \
                          [('scons_current_file', self.current_file)]
             self.tuples[:] = new_tuples + self.tuples
+        else:
+            if t and t[1] and '"' in t[1]:
+                print(f'Failed to identify target of #include  file={self.current_file}: {t}')
 
     # Date: Tue, 22 Nov 2005 20:26:09 -0500
     # From: Stefan Seefeld <seefeld@sympatico.ca>
@@ -549,23 +672,32 @@ class PreProcessor(object):
 
         s = t[1]
         while not s[0] in '<"':
-            #print("s =", s)
+            # print("s =", s)
             try:
                 s = self.cpp_namespace[s]
             except KeyError:
                 m = function_name.search(s)
-                s = self.cpp_namespace[m.group(1)]
-                if callable(s):
-                    args = function_arg_separator.split(m.group(2))
-                    s = s(*args)
+
+                # at least includes like "#include P_HEADER" where P_HEADER has been previously
+                # defined is causing that m.group[1] may be none. Ignoring the case
+                if m and m.group(1):
+                    s = self.cpp_namespace[m.group(1)]
+                    if callable(s):
+                        args = function_arg_separator.split(m.group(2))
+                        s = s(*args)
+                else:
+                    if m:
+                        print(f'Ignoring include  file={self.current_file}: {m}')
+                    return None
             if not s:
                 return None
-        return (t[0], s[0], s[1:-1])
+        return t[0], s[0], s[1:-1]
 
     def all_include(self, t):
         """
         """
         self.result.append(self.resolve_include(t))
+
 
 class DumbPreProcessor(PreProcessor):
     """A preprocessor that ignores all #if/#elif/#else/#endif directives
@@ -577,11 +709,13 @@ class DumbPreProcessor(PreProcessor):
     an example of how the main PreProcessor class can be sub-classed
     to tailor its behavior.
     """
+
     def __init__(self, *args, **kw):
         PreProcessor.__init__(self, *args, **kw)
         d = self.default_table
         for func in ['if', 'elif', 'else', 'endif', 'ifdef', 'ifndef']:
             d[func] = d[func] = self.do_nothing
+
 
 del __revision__
 
